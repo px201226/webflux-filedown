@@ -1,10 +1,14 @@
 package com.example.webfluxfiledown.controller;
 
+import static org.apache.poi.util.IOUtils.closeQuietly;
 import static org.springframework.http.MediaType.APPLICATION_JSON;
 
 import com.example.webfluxfiledown.model.User;
 import com.example.webfluxfiledown.service.CsvWriterService;
+import com.example.webfluxfiledown.util.ByteArrayInOutStream;
+import com.sun.istack.NotNull;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -12,18 +16,29 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.MalformedURLException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
+import javax.persistence.criteria.CriteriaBuilder.In;
 import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.reactivestreams.Publisher;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileUrlResource;
 import org.springframework.core.io.InputStreamResource;
 import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ReactiveHttpOutputMessage;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.ZeroCopyHttpOutputMessage;
 import org.springframework.http.codec.ResourceHttpMessageWriter;
@@ -37,7 +52,10 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.FluxSink.OverflowStrategy;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import reactor.util.function.Tuple2;
 
 @RestController
@@ -55,7 +73,6 @@ public class DownloadController {
 	public ResponseEntity downloadCsv() throws MalformedURLException {
 
 		String fileName = String.format("%s.csv", RandomStringUtils.randomAlphabetic(10));
-
 		return ResponseEntity.ok()
 				.header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName)
 				.header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_OCTET_STREAM_VALUE)
@@ -63,16 +80,15 @@ public class DownloadController {
 	}
 
 
-  @GetMapping("/2")
-  public Mono<Resource> downloadByWriteWith(ServerHttpResponse response) throws IOException {
+	@GetMapping("/2")
+	public Mono<Resource> downloadByWriteWith(ServerHttpResponse response) throws IOException {
+		String fileName = String.format("%s.csv", RandomStringUtils.randomAlphabetic(10));
+		response.getHeaders().set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName);
+		response.getHeaders().setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
-	  String fileName = String.format("%s.csv", RandomStringUtils.randomAlphabetic(10));
-    response.getHeaders().set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName);
-    response.getHeaders().setContentType(MediaType.APPLICATION_OCTET_STREAM);
-
-    Resource resource = new FileUrlResource("./mock.csv");
-	  final Mono<Resource> just = Mono.just(resource);
-    return just;
+		Resource resource = new FileUrlResource("./mock.csv");
+		final Mono<Resource> just = Mono.just(resource);
+		return just;
 	}
 
 
@@ -91,10 +107,64 @@ public class DownloadController {
 		return value;
 	}
 
-	@GetMapping("/4")
-	public Flux aa2a(ServerHttpResponse response) throws IOException {
-		Stream<Integer> stream = Stream.iterate(0, i -> i + 1);
-		return Flux.fromStream(stream.limit(2)).zipWith(Flux.interval(Duration.ofSeconds(1)))
-				.map(tuple -> Collections.singletonMap("value", tuple.getT1() /* 튜플의 첫 번째 요소 = Stream<Integer> 요소 */));
+	@GetMapping(value = "/4")
+	public Flux<DataBuffer> aa2a(ServerHttpResponse response) throws IOException {
+		final Stream<Integer> stream = Stream.iterate(0, i -> i + 1).limit(10000);
+
+		String fileName = String.format("%s.csv", RandomStringUtils.randomAlphabetic(10));
+		response.getHeaders().set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName);
+		response.getHeaders().setContentType(MediaType.TEXT_EVENT_STREAM);
+
+		final Flux<DataBuffer> next = Flux.<DataBuffer>create(emitter -> {
+
+					final DefaultDataBuffer dataBuffer = new DefaultDataBufferFactory().allocateBuffer();
+					final OutputStream outputStream = dataBuffer.asOutputStream();
+
+					stream
+							.map(i -> String.format("value,%s\n", i).getBytes(StandardCharsets.UTF_8))
+							.forEach(bytes -> {
+								try {
+									outputStream.write(bytes);
+									outputStream.flush();
+									emitter.next(dataBuffer);
+									Thread.sleep(10L);
+								} catch (IOException | InterruptedException e) {
+									e.printStackTrace();
+								}
+							});
+
+					emitter.complete();
+				}
+		);
+
+		return next;
 	}
+
+//
+//	private Mono<ServerResponse> writeToServerResponse(@NotNull String tag) {
+//
+//		return ServerResponse.ok()
+//				.contentType(MediaType.APPLICATION_OCTET_STREAM)
+//				.body(Flux.<DataBuffer>create((FluxSink<DataBuffer> emitter) -> {
+//					// for a really big blob I want to read it in chunks, so that my server doesn't use too much memory
+//					final int tagChunkSize;
+//					final int blobSize;
+//					for(int i = 0; i < blobSize; i+= tagChunkSize) {
+//						// new DataBuffer that is written to, then emitted later
+//						DefaultDataBuffer dataBuffer = new DefaultDataBufferFactory().allocateBuffer();
+//						try (OutputStream outputStream = dataBuffer.asOutputStream()) {
+//							// write to the outputstream of DataBuffer
+//							tag.BlobReadPartial(outputStream, i, tagChunkSize, FPLibraryConstants.FP_OPTION_DEFAULT_OPTIONS);
+//							// don't know if flushing is strictly neccessary
+//							outputStream.flush();
+//						} catch (IOException e) {
+//							emitter.error(e);
+//						}
+//						emitter.next(dataBuffer);
+//					}
+//					// if blob is finished, send "complete" to my flux of DataBuffers
+//					emitter.complete();
+//				}, OverflowStrategy.BUFFER).publishOn(Schedulers.newElastic("centera")), DataBuffer.class);
+//
+//	}
 }
