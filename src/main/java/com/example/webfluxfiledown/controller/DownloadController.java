@@ -26,6 +26,7 @@ import javax.persistence.criteria.CriteriaBuilder.In;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.poi.hssf.usermodel.HSSFWorkbook;
 import org.reactivestreams.Publisher;
+import org.springframework.core.codec.Hints;
 import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.FileUrlResource;
@@ -36,6 +37,7 @@ import org.springframework.core.io.buffer.DataBufferFactory;
 import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.core.io.buffer.DefaultDataBuffer;
 import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.core.io.buffer.PooledDataBuffer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.http.ReactiveHttpOutputMessage;
@@ -104,26 +106,35 @@ public class DownloadController {
 		response.getHeaders().set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName);
 		response.getHeaders().setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
-		return value;
+		return Flux.create(emitter -> {
+
+			stream.forEach(i -> {
+				emitter.next(String.valueOf(i));
+			});
+
+			emitter.complete();
+		});
+
 	}
 
-	@GetMapping(value = "/4")
-	public Flux<DataBuffer> aa2a(ServerHttpResponse response) throws IOException {
-		final Stream<Integer> stream = Stream.iterate(0, i -> i + 1).limit(10000);
+	@GetMapping(value = "/4", produces = "application/octet-stream")
+	public Mono<Void> aa2a(ServerHttpResponse response) throws IOException {
+		final Stream<Integer> stream = Stream.iterate(0, i -> i + 1).limit(1000);
+
+		final String repeat = "a".repeat(500);
 
 		String fileName = String.format("%s.csv", RandomStringUtils.randomAlphabetic(10));
 		response.getHeaders().set(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=" + fileName);
-		response.getHeaders().setContentType(MediaType.TEXT_EVENT_STREAM);
+		response.getHeaders().setContentType(MediaType.APPLICATION_OCTET_STREAM);
 
 		final Flux<DataBuffer> next = Flux.<DataBuffer>create(emitter -> {
-
-					final DefaultDataBuffer dataBuffer = new DefaultDataBufferFactory().allocateBuffer();
-					final OutputStream outputStream = dataBuffer.asOutputStream();
 
 					stream
 							.map(i -> String.format("value,%s\n", i).getBytes(StandardCharsets.UTF_8))
 							.forEach(bytes -> {
 								try {
+									final DefaultDataBuffer dataBuffer = new DefaultDataBufferFactory().allocateBuffer();
+									final OutputStream outputStream = dataBuffer.asOutputStream();
 									outputStream.write(bytes);
 									outputStream.flush();
 									emitter.next(dataBuffer);
@@ -137,7 +148,11 @@ public class DownloadController {
 				}
 		);
 
-		return next;
+		final Mono<Void> voidMono = response.writeAndFlushWith(next.map(dataBuffer -> {
+			return Mono.just(dataBuffer).doOnDiscard(PooledDataBuffer.class, DataBufferUtils::release);
+		}));
+
+		return voidMono;
 	}
 
 //
